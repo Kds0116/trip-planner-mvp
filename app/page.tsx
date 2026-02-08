@@ -1,131 +1,295 @@
-"use client";
+'use client'
 
-import { useState } from "react";
+import { useMemo, useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import Image from 'next/image'
+import type { Ogp } from "./types";
 
-type Days = "2泊3日" | "3泊4日";
-type Purpose = "観光" | "ゆるめ";
+export default function Home() {
+  const router = useRouter()
+  const [rawUrls, setRawUrls] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [items, setItems] = useState<Ogp[]>([])
+  const [error, setError] = useState<string | null>(null)
 
-export default function Page() {
-  const [days, setDays] = useState<Days>("2泊3日");
-  const [people, setPeople] = useState<number>(1);
-  const [purpose, setPurpose] = useState<Purpose>("観光");
+  const parsedUrls = useMemo(() => {
+    if (!rawUrls) return []
 
-  const [budget, setBudget] = useState(3);
-  const [hotel, setHotel] = useState(3);
-  const [food, setFood] = useState(3);
-  const [move, setMove] = useState(3);
+    // http(s):// を起点に URL を抽出
+    const matches = rawUrls.match(/https?:\/\/[^\s,]+/g) ?? []
 
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<string>("");
+    return Array.from(new Set(matches))
+  }, [rawUrls])
 
-  async function generate() {
-    setLoading(true);
-    setResult("生成中...");
-    try {
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          days,
-          people,
-          purpose,
-          budget_style: { budget, hotel, food, move },
-          depart: "東京"
-        })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "生成に失敗しました");
-      setResult(data.text);
-    } catch (e: any) {
-      setResult(`エラー: ${e.message}`);
-    } finally {
-      setLoading(false);
+  const extractUrls = (text: string) => {
+    return Array.from(new Set(text.match(/https?:\/\/[^\s,]+/g) ?? []))
+  }
+
+  const absorbUrlsFromText = (text: string) => {
+    const urls = extractUrls(text)
+    if (urls.length === 0) {
+      setRawUrls(text)
+      return
+    }
+
+    // 1) textareaからURLを消す（チャット置換）
+    let cleaned = text
+    for (const u of urls) {
+      try {
+        cleaned = cleaned.replaceAll(u, '')
+      } catch (error) {
+        console.error('Error replacing URL:', error)
+      }
+    }
+    setRawUrls(cleaned.trim())
+
+    // 2) URLは items 側に残すために、OGP取得を走らせる
+    //    ただし “今すでに表示しているURL” は再取得しない
+    const have = new Set(items.map((x) => x.url))
+    const need = urls.filter((u) => !have.has(u))
+    if (need.length > 0) {
+      // 即時にOGP取得（UX優先）
+      fetchOgpWithUrls(need)
     }
   }
 
-  const card: React.CSSProperties = {
-    background: "white",
-    borderRadius: 16,
-    padding: 16,
-    border: "1px solid #e5e7eb"
-  };
+  console.log('parsedUrls:', parsedUrls)
+  const fetchOgpWithUrls = async (urls: string[]) => {
+    if (urls.length === 0) return
+
+    setError(null)
+    setLoading(true)
+    try {
+      const res = await fetch('/api/ogp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ urls }),
+      })
+
+      if (!res.ok) throw new Error('OGP取得に失敗しました')
+
+      const data = (await res.json()) as { results: Ogp[] }
+
+      // 既存 items とマージ（urlキー）
+      setItems((prev) => {
+        const map = new Map<string, Ogp>()
+        prev.forEach((it) => map.set(it.url, it))
+        ;(data.results ?? []).forEach((it) => map.set(it.url, it))
+        return Array.from(map.values())
+      })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'エラーが発生しました')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 既存の「OGPを表示」ボタンは、textarea由来の parsedUrls を取る用途で残せる
+  const fetchOgp = async () => {
+    if (parsedUrls.length === 0) {
+      setItems([])
+      return
+    }
+    await fetchOgpWithUrls(parsedUrls)
+  }
+
+
+  const removeUrl = (url: string) => {
+    setItems((prev) => prev.filter((it) => it.url !== url))
+  }
+
+  // ✅ デバウンス：入力が止まったら自動取得
+  useEffect(() => {
+    if (parsedUrls.length === 0) {
+      setItems([])
+      return
+    }
+
+    const timer = setTimeout(() => {
+      fetchOgp()
+    }, 600)
+
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parsedUrls]) // parsedUrls が変わったら再スケジュール
 
   return (
-    <main style={{ background: "#f6f7f9", minHeight: "100vh", padding: 16 }}>
-      <div style={{ maxWidth: 820, margin: "0 auto", display: "grid", gap: 12 }}>
-        <h1 style={{ margin: 0 }}>旅行工程ジェネレーター（東京発・王道）</h1>
-        <p style={{ margin: 0, color: "#6b7280", fontSize: 13 }}>
-          幹事が「行き先まで言い切った」70%完成の叩き台を作る。飯は王道、時間ラフは外さない。
+    <div className="p-6 text-center max-w-md mx-auto">
+      {/* Logo */}
+      <div className="mb-8 flex justify-center">
+        <Image
+          src="/cocoico-ai_logo.png"
+          alt="Trip Planner"
+          width={100}
+          height={100}
+          priority
+        />
+      </div>
+
+      {/* Hero */}
+      <section className="mb-16">
+        <h1 className="text-[28px] font-bold leading-[1.45] text-emerald-600 mb-10">
+          まず
+          <br />
+          「行ってみたい！」
+          <br />
+          をかたちにしよう
+        </h1>
+        <div className="mb-8 flex justify-center">
+          <Image
+            src="/cocoico-ai_chara.png"
+            alt="Trip Planner"
+            width={150}
+            height={150}
+            priority
+          />
+        </div>
+        <p className="text-[13px] text-gray-600 leading-relaxed mb-10">
+          COCOICO-AIはあなたがソーシャルメディアなど日常生活で発見した行きたい場所までの実行プランを提案してくれるサービスです。
         </p>
 
-        <section style={card}>
-          <div style={{ display: "grid", gap: 10 }}>
-            <label>
-              日数：
-              <select value={days} onChange={(e) => setDays(e.target.value as Days)} style={{ marginLeft: 8 }}>
-                <option value="2泊3日">2泊3日</option>
-                <option value="3泊4日">3泊4日</option>
-              </select>
-            </label>
+        <button
+          onClick={() => {
+            try {
+              const q = new URLSearchParams()
+              items.forEach((it) => q.append('url', it.url))
+              const url = `/plan?${q.toString()}`
+              console.log('Navigating to:', url)
+              router.push(url)
+            } catch (error) {
+              console.error('Navigation error:', error)
+            }
+          }}
+          className="inline-flex items-center justify-center px-32 py-4 rounded-full font-semibold shadow-md transition outline-none border-0 text-[15px] bg-emerald-500 text-white cursor-pointer active:scale-[0.98]"
+        >
+          はじめる
+        </button>
+      </section>
 
-            <label>
-              人数（1〜6）：
-              <input
-                type="number"
-                min={1}
-                max={6}
-                value={people}
-                onChange={(e) => setPeople(Number(e.target.value))}
-                style={{ marginLeft: 8, width: 80 }}
-              />
-            </label>
+      {/* URL Paste Box */}
+      <section className="text-center mb-20">
+        <h2 className="text-[16px] font-bold text-gray-700 mb-3">
+          URLを貼り付け
+        </h2>
 
-            <label>
-              目的：
-              <select value={purpose} onChange={(e) => setPurpose(e.target.value as Purpose)} style={{ marginLeft: 8 }}>
-                <option value="観光">観光</option>
-                <option value="ゆるめ">ゆるめ</option>
-              </select>
-            </label>
+        <textarea
+          value={rawUrls}
+          onChange={(e) => {
+            // 入力中にURLが混じったら吸い上げ（置換）
+            absorbUrlsFromText(e.target.value)
+          }}
+          onPaste={(e) => {
+            // 貼った瞬間にカード化したいので、通常貼り付けを止めて吸い上げ
+            e.preventDefault()
+            const pasted = e.clipboardData.getData('text')
+            absorbUrlsFromText(`${rawUrls}\n${pasted}`)
+          }}
+          placeholder={`URLを貼り付けるとカードに置き換わる`}
+          className="w-full min-h-[60px] p-4 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-emerald-200 bg-white"
+        />
+        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+      </section>
 
-            <Range label="旅行にお金をかけたい度（節約↔記念）" v={budget} setV={setBudget} />
-            <Range label="宿の重視度（寝られればOK↔良い宿）" v={hotel} setV={setHotel} />
-            <Range label="食の重視度（最低限↔ご飯こだわる）" v={food} setV={setFood} />
-            <Range label="移動の快適さ（我慢OK↔快適重視）" v={move} setV={setMove} />
+      {/* OGP Cards */}
+      {items.length > 0 && (
+        <section className="space-y-2 text-center">
+          <h3 className="text-[16px] font-bold text-emerald-500">プレビュー</h3>
 
-            <button
-              onClick={generate}
-              disabled={loading}
-              style={{
-                padding: "12px 14px",
-                borderRadius: 14,
-                border: "1px solid #111827",
-                background: loading ? "#9ca3af" : "#111827",
-                color: "white",
-                fontWeight: 700
-              }}
-            >
-              {loading ? "生成中..." : "叩き台を作る（AI）"}
-            </button>
+          <div className="w-full min-h-[60px] p-4 rounded-xl border border-emerald-500 bg-white">
+            {items.map((it) => (
+              <OgpCard key={it.url} item={it} onRemove={() => removeUrl(it.url)} />
+            ))}
           </div>
         </section>
+      )}
 
-        <section style={card}>
-          <h2 style={{ margin: "0 0 8px", fontSize: 16 }}>出力（70%完成）</h2>
-          <pre style={{ margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6, fontSize: 14 }}>
-            {result || "ここにAIの旅行工程が表示されます。"}
-          </pre>
-        </section>
-      </div>
-    </main>
-  );
+      {/* Features */}
+      <section className="space-y-16 mt-20">
+        <Feature
+          title="比較しない"
+          description="候補を並べません。ひとつだけ提案します。"
+        />
+        <Feature
+          title="入力が少ない"
+          description="タップ中心。考えることを減らします。"
+        />
+        <Feature
+          title="共有できる"
+          description="途中の状態をURLでそのまま共有。"
+        />
+      </section>
+    </div>
+  )
 }
 
-function Range({ label, v, setV }: { label: string; v: number; setV: (n: number) => void }) {
+function OgpCard({
+  item,
+  onRemove,
+}: {
+  item: Ogp
+  onRemove: () => void
+}) {
+  const title = item.title ?? item.url
+  const desc = item.description
+  const site = item.siteName
+
   return (
-    <label style={{ display: "grid", gap: 6 }}>
-      <span style={{ fontSize: 13 }}>{label}：{v}</span>
-      <input type="range" min={1} max={5} value={v} onChange={(e) => setV(Number(e.target.value))} />
-    </label>
-  );
+    <div className="relative p-4 rounded-xl border border-gray-200 bg-white flex gap-4 overflow-hidden">
+      {/* × ボタン */}
+      <button
+        type="button"
+        onClick={onRemove}
+        className="
+          absolute top-2 right-2 z-10
+          w-8 h-8 rounded-full
+          flex items-center justify-center
+          text-gray-500
+          hover:bg-gray-100
+          active:scale-[0.98]
+          transition
+        "
+        aria-label="このURLを削除"
+        title="削除"
+      >
+        ×
+      </button>
+
+      {item.image ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={item.image}
+          alt=""
+          className="w-16 h-16 rounded-lg object-cover flex-shrink-0"
+          loading="lazy"
+        />
+      ) : (
+        <div className="w-16 h-16 rounded-lg bg-gray-100 flex-shrink-0" />
+      )}
+
+      <div className="flex-1 min-w-0 pr-8 overflow-hidden">
+        {site && <div className="text-xs text-gray-500 truncate">{site}</div>}
+        <div className="font-semibold text-black truncate break-words">{title}</div>
+        {desc && (
+          <div className="text-sm text-gray-600 mt-1 break-words overflow-hidden line-clamp-2">
+            {desc}
+          </div>
+        )}
+        <div className="text-xs text-gray-400 mt-2 truncate break-all">{item.url}</div>
+      </div>
+    </div>
+  )
 }
+
+const Feature = ({
+  title,
+  description,
+}: {
+  title: string
+  description: string
+}) => (
+  <div className="text-center">
+    <h3 className="text-[17px] font-bold text-black mb-4">{title}</h3>
+    <p className="text-[14px] text-gray-600 leading-relaxed">{description}</p>
+  </div>
+)
+
